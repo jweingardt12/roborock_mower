@@ -9,6 +9,7 @@ import sys
 import types
 import unittest
 from typing import Generic, TypeVar
+from unittest.mock import AsyncMock
 
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -125,15 +126,23 @@ _package = types.ModuleType(_package_name)
 _package.__path__ = []
 _const = types.ModuleType(f"{_package_name}.const")
 _const.DOMAIN = "roborock_mower"
+_const.STATUS_MOW_EFF_MODE = "133"
 _coordinator = types.ModuleType(f"{_package_name}.coordinator")
 _coordinator.RoborockMowerCoordinator = object
 _coordinator.RoborockMowerDevice = object
 _coordinator.mower_device_id = lambda device: device.duid
+_coordinator.status_value = lambda device, status_id: device.device_status.get(status_id)
+_mower_api = types.ModuleType(f"{_package_name}.mower_api")
+_mower_api.EFF_MODE_LABELS = {1: "Daily", 2: "Efficient", 3: "Manicure"}
+_mower_api.EFF_MODE_REVERSE = {
+    label: code for code, label in _mower_api.EFF_MODE_LABELS.items()
+}
 sys.modules.update(
     {
         _package_name: _package,
         f"{_package_name}.const": _const,
         f"{_package_name}.coordinator": _coordinator,
+        f"{_package_name}.mower_api": _mower_api,
     }
 )
 
@@ -155,6 +164,7 @@ class FakeApi:
         self.areas = areas
         self.discovery_calls = 0
         self.start_area_mow_calls: list[list[dict[str, object]]] = []
+        self.set_mow_eff_mode = AsyncMock()
 
     async def get_areas(self) -> list[dict[str, object]]:
         self.discovery_calls += 1
@@ -167,13 +177,27 @@ class FakeApi:
         self.start_area_mow_calls.append(areas)
 
 
+class FakeMower:
+    """Minimal mower object for the efficiency selector state."""
+
+    def __init__(self) -> None:
+        self.device = types.SimpleNamespace(
+            duid="a235",
+            name="RockMow",
+            fv="1.0",
+            sn="serial",
+            device_status={"133": 1},
+        )
+        self.product = types.SimpleNamespace(model="roborock.mower.a235")
+
+
 class FakeCoordinator:
     """Mock coordinator exposing the production gating boundary."""
 
     def __init__(
         self, enabled: dict[str, bool], apis: dict[str, FakeApi | None]
     ) -> None:
-        self.data = {mower_id: object() for mower_id in enabled}
+        self.data = {mower_id: FakeMower() for mower_id in enabled}
         self._enabled = enabled
         self._apis = apis
 
@@ -204,8 +228,10 @@ class SavedAreaSelectTests(unittest.IsolatedAsyncioTestCase):
 
         await select.async_setup_entry(hass, entry, entities.extend)
 
-        self.assertEqual(len(entities), 1)
-        entity = entities[0]
+        self.assertEqual(len(entities), 2)
+        entity = next(
+            entity for entity in entities if entity._attr_translation_key == "mow_area"
+        )
         self.assertEqual(entity.options, ["Front"])
         self.assertIsNone(entity.current_option)
         self.assertEqual(good_api.discovery_calls, 1)
@@ -228,9 +254,34 @@ class SavedAreaSelectTests(unittest.IsolatedAsyncioTestCase):
         await select.async_setup_entry(hass, entry, entities.extend)
 
         coordinator._enabled["a235"] = False
-        await entities[0].async_select_option("Front")
+        area_entity = next(
+            entity for entity in entities if entity._attr_translation_key == "mow_area"
+        )
+        await area_entity.async_select_option("Front")
 
         self.assertEqual(api.start_area_mow_calls, [])
+
+    async def test_efficiency_selector_reads_dps_and_rechecks_write_gate(self) -> None:
+        api = FakeApi([{"id": 2, "name": "Front"}])
+        coordinator = FakeCoordinator({"a235": True}, {"a235": api})
+        entry = types.SimpleNamespace(entry_id="entry")
+        hass = types.SimpleNamespace(data={"roborock_mower": {"entry": coordinator}})
+        entities: list[object] = []
+
+        await select.async_setup_entry(hass, entry, entities.extend)
+        entity = next(
+            entity for entity in entities if entity._attr_translation_key == "mow_eff_mode"
+        )
+
+        self.assertEqual(entity.options, ["Daily", "Efficient", "Manicure"])
+        self.assertEqual(entity.current_option, "Daily")
+        await entity.async_select_option("Efficient")
+        api.set_mow_eff_mode.assert_awaited_once_with("Efficient")
+
+        coordinator._enabled["a235"] = False
+        with self.assertRaises(select.HomeAssistantError):
+            await entity.async_select_option("Daily")
+        self.assertEqual(api.set_mow_eff_mode.await_count, 1)
 
     def test_duplicate_names_and_missing_ids_are_not_selectable(self) -> None:
         self.assertEqual(

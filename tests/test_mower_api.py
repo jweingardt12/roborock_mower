@@ -141,6 +141,68 @@ class RemotePbPayloadTests(unittest.IsolatedAsyncioTestCase):
                     },
                 )
 
+    async def test_set_mow_height_sends_exact_remote_command(self) -> None:
+        with patch.object(mower_api.time, "time", return_value=1700000000.123):
+            await self.api.set_mow_height(40)
+        self.rpc_channel.send_command.assert_awaited_once_with(
+            "remote_pb",
+            params={
+                "id": "1700000000123",
+                "type": "REMOTE_CMD",
+                "remote_cmd": {
+                    "type": "MAIN_CUTTER_HEIGHT",
+                    "main_cutter_height": 40,
+                },
+            },
+        )
+
+    async def test_set_mow_height_rejects_out_of_range_or_fractional_values(self) -> None:
+        for height in (19, 71, -1, 40.5, True, "not-a-height"):
+            with self.subTest(height=height):
+                self.rpc_channel.reset_mock()
+                with self.assertRaises(ValueError):
+                    await self.api.set_mow_height(height)
+                self.rpc_channel.send_command.assert_not_awaited()
+
+    async def test_set_efficiency_mode_preserves_full_global_preference(self) -> None:
+        preference = {
+            "mow_times": 1,
+            "effective": "DAILY",
+            "direction": 5,
+            "keep_edge": 1,
+            "mode": "GLOBAL",
+        }
+        response = {"preference_config": {"global": preference, "custom": []}}
+        self.rpc_channel.send_command.side_effect = [
+            RoborockException(f"Unexpected API Result: {json.dumps(response)}"),
+            {"ok": True},
+        ]
+        with patch.object(mower_api.time, "time", return_value=1700000000.123):
+            await self.api.set_mow_eff_mode("Efficient")
+        self.assertEqual(preference["effective"], "DAILY")
+        self.assertEqual(self.rpc_channel.send_command.await_count, 2)
+        self.assertEqual(
+            self.rpc_channel.send_command.await_args_list[1].kwargs["params"],
+            {
+                "id": "1700000000123",
+                "type": "SET_MOW_PREFERENCE",
+                "mow_preference": {
+                    "mow_times": 1,
+                    "effective": "EFFICIENT",
+                    "direction": 5,
+                    "keep_edge": 1,
+                    "mode": "GLOBAL",
+                },
+            },
+        )
+
+    async def test_set_efficiency_mode_refuses_partial_preference_write(self) -> None:
+        self.rpc_channel.send_command.return_value = {
+            "preference_config": {"custom": []}
+        }
+        with self.assertRaisesRegex(RoborockException, "partial write"):
+            await self.api.set_mow_eff_mode("Daily")
+        self.rpc_channel.send_command.assert_awaited_once()
     async def test_rpc_error_is_propagated_without_retry(self) -> None:
         self.rpc_channel.send_command.side_effect = RoborockException("mower unavailable")
         with patch.object(mower_api.time, "time", return_value=1700000000.123):
@@ -154,6 +216,7 @@ class RemotePbPayloadTests(unittest.IsolatedAsyncioTestCase):
                 "app_button": "MOW_END",
             },
         )
+
 
     async def test_start_area_mow_sends_exact_select_payload(self) -> None:
         with patch.object(mower_api.time, "time", return_value=1700000000.123):

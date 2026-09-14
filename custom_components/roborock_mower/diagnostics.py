@@ -9,6 +9,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN, SENSITIVE_DIAGNOSTIC_KEYS
+from .coordinator import redact_gps_data
 
 
 async def async_get_config_entry_diagnostics(
@@ -22,7 +23,7 @@ async def async_get_config_entry_diagnostics(
 
     if coordinator and coordinator.data:
         for mower in coordinator.data.values():
-            device = mower.device.as_dict()
+            device = redact_gps_data(mower.device.as_dict())
             product = mower.product.as_dict()
             mowers.append(
                 {
@@ -46,13 +47,15 @@ async def async_get_config_entry_diagnostics(
 
     return async_redact_data(
         {
-            "entry": entry.as_dict(),
+            "entry": redact_gps_data(entry.as_dict()),
             "mqtt": {
                 "last_mqtt_update": getattr(coordinator, "last_mqtt_update", None),
                 "last_mqtt_protocol": getattr(coordinator, "last_mqtt_protocol", None),
                 "last_mqtt_seen": getattr(coordinator, "last_mqtt_seen", {}),
                 "last_mqtt_online_hint": getattr(coordinator, "last_mqtt_online_hint", {}),
-                "last_mqtt_payload": getattr(coordinator, "last_mqtt_payload", {}),
+                "last_mqtt_payload": redact_gps_data(
+                    getattr(coordinator, "last_mqtt_payload", {})
+                ),
                 "mqtt_connected": getattr(coordinator, "mqtt_connected", None),
                 "mqtt_subscribed": getattr(coordinator, "mqtt_subscribed", {}),
                 "last_mqtt_error": getattr(coordinator, "last_mqtt_error", None),

@@ -7,6 +7,7 @@ unit-tested with a mocked RPC channel.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import time
@@ -20,6 +21,8 @@ _LOGGER = logging.getLogger(__name__)
 REMOTE_PB_METHOD = "remote_pb"
 TYPE_APP_BUTTON = "APP_BUTTON"
 TYPE_GET_MOW_PREFERENCE_CONFIG = "GET_MOW_PREFERENCE_CONFIG"
+TYPE_REMOTE_CMD = "REMOTE_CMD"
+TYPE_SET_MOW_PREFERENCE = "SET_MOW_PREFERENCE"
 
 BUTTON_MOW_GLOBAL = "MOW_GLOBAL"
 BUTTON_MOW_EDGE = "MOW_EDGE"
@@ -28,6 +31,12 @@ BUTTON_MOW_PAUSE = "MOW_PAUSE"
 BUTTON_MOW_RESUME = "MOW_RESUME"
 BUTTON_MOW_END = "MOW_END"
 BUTTON_CHARGE = "CHARGE"
+
+EFF_MODE_LABELS: dict[int, str] = {1: "Daily", 2: "Efficient", 3: "Manicure"}
+EFF_MODE_REVERSE: dict[str, int] = {label: code for code, label in EFF_MODE_LABELS.items()}
+EFF_MODE_WIRE: dict[int, str] = {1: "DAILY", 2: "EFFICIENT", 3: "MANICURE"}
+MOW_HEIGHT_MIN = 20
+MOW_HEIGHT_MAX = 70
 
 PAUSED_MOW_STATES = frozenset({2, 58})
 _UNEXPECTED_RESULT_PREFIX = "Unexpected API Result: "
@@ -142,8 +151,11 @@ class MowerApi:
         _LOGGER.debug("[%s] Sending RockMow remote_pb command %s", self._duid, payload.get("type"))
         try:
             return await self._rpc_channel.send_command(REMOTE_PB_METHOD, params=message)
-        except RoborockException:
-            _LOGGER.warning("[%s] RockMow remote_pb command failed", self._duid, exc_info=True)
+        except RoborockException as err:
+            if not str(err).startswith(_UNEXPECTED_RESULT_PREFIX):
+                _LOGGER.warning(
+                    "[%s] RockMow remote_pb command failed", self._duid, exc_info=True
+                )
             raise
 
     async def _query(self, payload: dict[str, Any]) -> Any:
@@ -244,3 +256,76 @@ class MowerApi:
         """Compatibility alias for the saved-area discovery method."""
 
         return await self.get_areas()
+
+    async def set_mow_height(self, height: int | float) -> Any:
+        """Set the cutter height through the app's ``MAIN_CUTTER_HEIGHT`` RPC.
+
+        The integration deliberately does not persist this value in the mowing
+        preference.  The UI exposes a provisional 20--70 mm range, while the
+        device-reported motor limits are not available in the DPS snapshot.
+        """
+
+        if isinstance(height, bool):
+            raise ValueError("cutting height must be an integer")
+        if isinstance(height, float) and not height.is_integer():
+            raise ValueError("cutting height must be an integer")
+        try:
+            height_value = int(height)
+        except (TypeError, ValueError, OverflowError) as err:
+            raise ValueError("cutting height must be an integer") from err
+        if height_value < MOW_HEIGHT_MIN or height_value > MOW_HEIGHT_MAX:
+            raise ValueError(
+                f"cutting height must be between {MOW_HEIGHT_MIN} and {MOW_HEIGHT_MAX} mm"
+            )
+        return await self._send_remote_msg(
+            {
+                "type": TYPE_REMOTE_CMD,
+                "remote_cmd": {
+                    "type": "MAIN_CUTTER_HEIGHT",
+                    "main_cutter_height": height_value,
+                },
+            }
+        )
+
+    async def _get_global_mow_preference(self) -> dict[str, Any] | None:
+        """Return a copy of the complete global preference, if readable."""
+
+        config = await self.get_mow_preference_config()
+        global_preference = config.get("global") if isinstance(config, dict) else None
+        if not isinstance(global_preference, dict):
+            return None
+        return copy.deepcopy(global_preference)
+
+    async def set_mow_eff_mode(self, mode: int | str) -> Any:
+        """Read-modify-write the complete global efficiency preference.
+
+        A missing preference is a hard failure: sending a partial preference
+        could reset unrelated mowing settings, so this method never synthesizes
+        a fallback payload.
+        """
+
+        if isinstance(mode, str):
+            mode_code = EFF_MODE_REVERSE.get(mode)
+        elif isinstance(mode, bool):
+            mode_code = None
+        else:
+            try:
+                mode_code = int(mode)
+            except (TypeError, ValueError, OverflowError):
+                mode_code = None
+        effective = EFF_MODE_WIRE.get(mode_code) if mode_code is not None else None
+        if effective is None:
+            raise ValueError(f"Unknown efficiency mode: {mode}")
+
+        global_preference = await self._get_global_mow_preference()
+        if global_preference is None:
+            raise RoborockException(
+                "Roborock mower global preference could not be read; refusing partial write"
+            )
+        global_preference["effective"] = effective
+        return await self._send_remote_msg(
+            {
+                "type": TYPE_SET_MOW_PREFERENCE,
+                "mow_preference": global_preference,
+            }
+        )

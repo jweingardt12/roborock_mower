@@ -40,6 +40,7 @@ from .const import (
     ONLINE_GRACE_PERIOD,
     ROCKMOW_Z1_MODEL,
     SCAN_INTERVAL,
+    STATUS_GPS_COORDINATE,
 )
 from .control import write_controls_enabled
 from .mower_api import MowerApi
@@ -99,6 +100,29 @@ def status_value(device: HomeDataDevice, status_id: str) -> Any:
     if not device.device_status:
         return None
     return device.device_status.get(status_id)
+
+
+_GPS_REDACTED = "<gps redacted>"
+_GPS_KEYS = {
+    str(STATUS_GPS_COORDINATE),
+    "gps_coordinate",
+    "gpsCoordinate",
+}
+
+
+def redact_gps_data(value: Any) -> Any:
+    """Return a copy of data with GPS values removed from outward surfaces."""
+
+    if isinstance(value, dict):
+        return {
+            key: _GPS_REDACTED if str(key) in _GPS_KEYS else redact_gps_data(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_gps_data(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(redact_gps_data(item) for item in value)
+    return value
 
 
 class RoborockMowerCoordinator(DataUpdateCoordinator[dict[str, RoborockMowerDevice]]):
@@ -389,7 +413,8 @@ class RoborockMowerCoordinator(DataUpdateCoordinator[dict[str, RoborockMowerDevi
         mower.device.device_status = device_status
         mower.device.online = True
         self.last_mqtt_online_hint[mower_id] = True
-        self.last_mqtt_payload[mower_id] = raw_dps
+        safe_raw_dps = redact_gps_data(raw_dps)
+        self.last_mqtt_payload[mower_id] = safe_raw_dps
 
         if changed:
             self.last_status_change[mower_id] = self.last_mqtt_update or dt_util.utcnow()
@@ -397,14 +422,14 @@ class RoborockMowerCoordinator(DataUpdateCoordinator[dict[str, RoborockMowerDevi
             _LOGGER.info(
                 "Roborock mower %s status changed from MQTT: %s",
                 mower.device.name,
-                changed,
+                redact_gps_data(changed),
             )
         else:
             self.last_static_status_update[mower_id] = self.last_mqtt_update or dt_util.utcnow()
             _LOGGER.debug(
                 "Roborock mower %s status unchanged from MQTT: %s",
                 mower.device.name,
-                raw_dps,
+                safe_raw_dps,
             )
 
         self._cancel_pending_offline(mower_id)
@@ -495,7 +520,7 @@ class RoborockMowerCoordinator(DataUpdateCoordinator[dict[str, RoborockMowerDevi
                 _LOGGER.info(
                     "Roborock mower %s initial status from cloud: %s",
                     mower.device.name,
-                    status,
+                    redact_gps_data(status),
                 )
                 continue
 
@@ -509,11 +534,17 @@ class RoborockMowerCoordinator(DataUpdateCoordinator[dict[str, RoborockMowerDevi
                 continue
 
             changed = {
-                key: {"old": previous_status.get(key), "new": value}
+                key: {
+                    "old": redact_gps_data(previous_status.get(key)),
+                    "new": redact_gps_data(value),
+                }
                 for key, value in status.items()
                 if previous_status.get(key) != value
             }
-            removed = {key: previous_status[key] for key in previous_status.keys() - status.keys()}
+            removed = {
+                key: redact_gps_data(previous_status[key])
+                for key in previous_status.keys() - status.keys()
+            }
             self.last_status_change[mower_id] = self.last_cloud_update or dt_util.utcnow()
             self._last_device_status[mower_id] = status
             _LOGGER.info(

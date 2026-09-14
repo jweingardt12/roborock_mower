@@ -4,7 +4,7 @@
 
 Read-only by default Home Assistant custom integration for Roborock RockMow Z1 / Z115. Optional write controls are disabled unless explicitly enabled in the integration options.
 
-Version 0.4 uses Roborock MQTT/DPS push as the primary status source and keeps `get_home_data_v3(user_data)` as a slow cloud fallback.
+Version 0.5 adds opt-in cutting-height, efficiency-mode, and multi-zone actions, plus expanded read-only DPS status sensors. It uses Roborock MQTT/DPS push as the primary status source and keeps `get_home_data_v3(user_data)` as a slow cloud fallback.
 
 ## Supported device
 
@@ -45,8 +45,8 @@ It also creates these read-only status entities:
 - `sensor.<device>_charge_state`
 - `sensor.<device>_mow_progress`
 - `sensor.<device>_mow_height`
-- `sensor.<device>_gps_raw`
-- `sensor.<device>_network_channel`
+- `sensor.<device>_gps_raw` (redacted and disabled by default)
+- additional diagnostic sensors for mower, mapping, charging, OTA, network, blade, and error status
 - `binary_sensor.<device>_online`
 
 All entities are linked to the same Home Assistant device. Unique IDs use DUID, with SN as fallback.
@@ -55,18 +55,27 @@ All entities are linked to the same Home Assistant device. Unique IDs use DUID, 
 
 The main `lawn_mower` entity is read-only by default. To expose start/resume, pause, and dock actions, open the integration's **Configure** dialog and enable **Mower controls**. The option defaults to disabled and is stored in the config entry options.
 
-When enabled, only the exact tested model `roborock.mower.a235` receives write actions. Two additional buttons are exposed:
+When controls are enabled, only the exact tested model `roborock.mower.a235` receives actuator writes. The existing lawn-mower controls and buttons remain available:
 
 - `button.<device>_edge_cut`
 - `button.<device>_stop` (stop/end task)
 
-The controls send the app-style `remote_pb` RPC with `APP_BUTTON` values: `MOW_GLOBAL`, `MOW_RESUME`, `MOW_PAUSE`, `CHARGE`, `MOW_EDGE`, and `MOW_END` respectively. Start/resume chooses `MOW_RESUME` when the mower reports a paused state; otherwise it sends `MOW_GLOBAL`.
+They send `APP_BUTTON` values through `remote_pb`: `MOW_GLOBAL`, `MOW_RESUME`, `MOW_PAUSE`, `CHARGE`, `MOW_EDGE`, and `MOW_END`. Start/resume chooses `MOW_RESUME` when the mower reports a paused state; otherwise it sends `MOW_GLOBAL`.
 
-When controls are enabled and the mower returns valid saved areas, a `select.<device>_mow_area` entity is also exposed. Its options are the unambiguous saved area names returned by the read-only `GET_MOW_PREFERENCE_CONFIG` query. Setup and discovery do not start mowing; only an explicit selection sends `MOW_SELECT` with the selected area's `modify_map.boundaries` payload. Invalid, missing-ID, or duplicate-name entries are omitted. The select is intentionally a single-area action selector; no separate service is required for the supported UI.
+Two additional setting entities are exposed:
 
-The command payload and action mapping, including `MOW_SELECT`, were ported from the RockNeo preview to the python-roborock 7.x V1 RPC channel. This zone command protocol is **not live-verified on the exact a235 RockMow**. Enabling controls is experimental and may cause unexpected behavior; keep the option disabled unless you intentionally accept that risk.
+- `number.<device>_cutting_height` — approximately 0.79–2.76 in, with 0.01 in steps; values are rounded to whole millimetres on the wire
+- `select.<device>_mow_eff_mode` — `Daily`, `Efficient`, or `Manicure`
 
-The `gps_raw` sensor keeps Roborock's raw DPS `142` value as its state. When the observed RockMow GPS payload format can be decoded, it also exposes `latitude` and `longitude` attributes. This is still treated as an experimental "last known position" value, not a live tracker.
+Cutting height uses `MAIN_CUTTER_HEIGHT` and may physically actuate the cutter mechanism. Efficiency mode reads the complete `preference_config.global`, changes only `effective`, and refuses to write if the complete preference cannot be read. Neither setting should start mowing, but both are experimental and unverified on the exact a235 device.
+
+When controls are enabled and the mower returns valid saved areas, a `select.<device>_mow_area` entity is also exposed. Its options are the unambiguous saved area names returned by the read-only `GET_MOW_PREFERENCE_CONFIG` query. Setup and discovery do not start mowing; only an explicit selection sends `MOW_SELECT` with the selected area's `modify_map.boundaries` payload. Invalid, missing-ID, or duplicate-name entries are omitted.
+
+For multiple areas, call `roborock_mower.mow_areas` with one mower device target and a non-empty `area_ids` list, for example `[2, 3]`. The service reads a fresh saved-area snapshot, rejects duplicate or stale IDs, resolves canonical names, and sends one `MOW_SELECT` command. This multi-zone command protocol is **not live-verified on the exact a235 RockMow**.
+
+The command payload and action mapping were ported from the RockNeo preview to the python-roborock 7.x V1 RPC channel. Enabling controls is experimental and may cause unexpected behavior; keep the option disabled unless you intentionally accept that risk.
+
+The `gps_raw` sensor never exposes or decodes GPS bytes. Its state is unavailable and its raw-value attribute contains only a redaction marker; its entity is disabled by default.
 
 ## Status source
 
@@ -88,14 +97,19 @@ Binary/map-like MQTT protocols `301` and `702` are logged at debug level only. T
 | 125 | `mapping_state` |
 | 126 | `ota_state` |
 | 127 | `charge_state` |
+| 128 | `dock_state` |
 | 129 | `charge_type` |
+| 130 | `pend_type` |
+| 131 | `remote_state` |
 | 132 | `mow_start_type` |
 | 133 | `mow_eff_mode` |
 | 134 | `mow_height` |
 | 135 | `mow_direction_angle` |
+| 136 | `mow_pattern` |
 | 138 | `offline_status` |
 | 139 | `mow_progress` |
-| 142 | `gps_coordinate` |
+| 140 | `blade_lifespan` |
+| 142 | `gps_coordinate` (redacted) |
 | 143 | `off_dock_no_task_status` |
 | 144 | `afs_status` |
 | 145 | `network_channel` |
@@ -138,7 +152,7 @@ Useful attributes include:
 - `last_mqtt_error`
 - `last_cloud_update`
 - `last_rate_limit`
-- `latitude` and `longitude` on `gps_raw`, when DPS `142` can be decoded
+- GPS payloads are redacted; no latitude/longitude is exposed
 
 If the standalone MQTT probe sees activity but Home Assistant does not update, check these attributes first. `mqtt_subscribed` should be true for the mower, `last_mqtt_update` should move when DPS messages arrive, and `last_mqtt_error` should be empty.
 
@@ -146,4 +160,4 @@ Diagnostics redact sensitive values such as `localKey`, `duid`, `sn`, `token`, a
 
 ## Not implemented
 
-Map geometry and full-map decoding are not implemented. Saved-area discovery is best-effort and read-only; the `MOW_SELECT` write-action protocol remains unverified on a235 until live testing is explicitly authorized.
+Map geometry and full-map decoding are not implemented. Saved-area discovery and multi-zone validation are read-only until the final `MOW_SELECT` command; that command, cutting-height command, and efficiency preference write remain unverified on a235 until live testing is explicitly authorized.

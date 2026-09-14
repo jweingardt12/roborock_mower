@@ -61,8 +61,16 @@
       }
     },
     "select": {
+      "mow_eff_mode": {
+        "name": "Efficiency mode"
+      },
       "mow_area": {
         "name": "Mow Area"
+      }
+    },
+    "number": {
+      "cutting_height": {
+        "name": "Cutting height"
       }
     }
   }

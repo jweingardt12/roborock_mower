@@ -15,8 +15,14 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
-from .coordinator import RoborockMowerCoordinator, RoborockMowerDevice, mower_device_id
+from .const import DOMAIN, STATUS_MOW_EFF_MODE
+from .coordinator import (
+    RoborockMowerCoordinator,
+    RoborockMowerDevice,
+    mower_device_id,
+    status_value,
+)
+from .mower_api import EFF_MODE_LABELS, EFF_MODE_REVERSE
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -71,13 +77,14 @@ async def async_setup_entry(
     """Discover saved areas and expose them only behind the existing write gate."""
 
     coordinator: RoborockMowerCoordinator = hass.data[DOMAIN][entry.entry_id]
-    entities: list[RoborockMowAreaSelect] = []
+    entities: list[SelectEntity] = []
     for mower_id in coordinator.data:
         if not coordinator.write_controls_enabled_for(mower_id):
             continue
         api = coordinator.mower_api_for(mower_id)
         if api is None:
             continue
+        entities.append(RoborockEfficiencyModeSelect(coordinator, mower_id))
         try:
             areas = await api.get_areas()
         except RoborockException as err:
@@ -87,6 +94,86 @@ async def async_setup_entry(
         if safe_areas:
             entities.append(RoborockMowAreaSelect(coordinator, mower_id, safe_areas))
     async_add_entities(entities)
+
+
+class RoborockEfficiencyModeSelect(
+    CoordinatorEntity[RoborockMowerCoordinator], SelectEntity
+):
+    """Opt-in select for the mower's global efficiency preference."""
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "mow_eff_mode"
+    _attr_icon = "mdi:speedometer"
+    _attr_options = list(EFF_MODE_LABELS.values())
+
+    def __init__(self, coordinator: RoborockMowerCoordinator, mower_id: str) -> None:
+        """Initialize the efficiency-mode selector."""
+
+        super().__init__(coordinator)
+        self._mower_id = mower_id
+        self._attr_unique_id = f"{mower_id}_mow_eff_mode"
+
+    @property
+    def _mower(self) -> RoborockMowerDevice | None:
+        """Return the mower represented by this entity."""
+
+        return self.coordinator.data.get(self._mower_id)
+
+    @property
+    def device_info(self) -> DeviceInfo | None:
+        """Return device registry information."""
+
+        if self._mower is None:
+            return None
+        device = self._mower.device
+        product = self._mower.product
+        return DeviceInfo(
+            identifiers={(DOMAIN, mower_device_id(device))},
+            manufacturer="Roborock",
+            name=device.name,
+            model=product.model,
+            sw_version=device.fv,
+            serial_number=device.sn,
+        )
+
+    @property
+    def available(self) -> bool:
+        """Only expose the preference actuator while its gate is active."""
+
+        return (
+            super().available
+            and self.coordinator.write_controls_enabled_for(self._mower_id)
+            and self.coordinator.mower_api_for(self._mower_id) is not None
+        )
+
+    @property
+    def current_option(self) -> str | None:
+        """Return the known label for DPS 133; unknown values remain unset."""
+
+        if self._mower is None:
+            return None
+        value = status_value(self._mower.device, STATUS_MOW_EFF_MODE)
+        if isinstance(value, bool):
+            return None
+        try:
+            return EFF_MODE_LABELS.get(int(value))
+        except (TypeError, ValueError):
+            return None
+
+    async def async_select_option(self, option: str) -> None:
+        """Read-modify-write the selected efficiency preference."""
+
+        if not self.coordinator.write_controls_enabled_for(self._mower_id):
+            raise HomeAssistantError("Roborock mower controls are not enabled")
+        if option not in EFF_MODE_REVERSE:
+            raise HomeAssistantError("Unknown Roborock mower efficiency mode")
+        api = self.coordinator.mower_api_for(self._mower_id)
+        if api is None:
+            raise HomeAssistantError("Roborock mower controls are not available")
+        try:
+            await api.set_mow_eff_mode(option)
+        except RoborockException as err:
+            raise HomeAssistantError(f"Roborock mower efficiency mode failed: {err}") from err
 
 
 class RoborockMowAreaSelect(CoordinatorEntity[RoborockMowerCoordinator], SelectEntity):

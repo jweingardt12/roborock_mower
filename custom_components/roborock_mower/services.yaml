@@ -1,0 +1,19 @@
+mow_areas:
+  name: Mow areas
+  description: >-
+    Start one select-area mow using saved areas from the targeted Roborock
+    mower. The service reads the current saved-area snapshot, validates every
+    id, and sends one MOW_SELECT command.
+  target:
+    device:
+      integration: roborock_mower
+  fields:
+    area_ids:
+      name: Area IDs
+      description: >-
+        Non-empty list of saved area IDs. IDs must belong to the targeted
+        mower; names are resolved from its current saved-area snapshot.
+      required: true
+      example: "[2, 3]"
+      selector:
+        object:
