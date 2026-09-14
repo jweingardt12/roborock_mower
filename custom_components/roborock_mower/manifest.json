@@ -7,5 +7,5 @@
   "documentation": "https://github.com/jweingardt12/roborock_mower",
   "iot_class": "cloud_push",
   "requirements": ["python-roborock==7.7.1"],
-  "version": "0.3.0"
+  "version": "0.4.0"
 }

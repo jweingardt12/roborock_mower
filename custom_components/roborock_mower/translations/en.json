@@ -59,6 +59,11 @@
       "stop": {
         "name": "Stop/end task"
       }
+    },
+    "select": {
+      "mow_area": {
+        "name": "Mow Area"
+      }
     }
   }
 }

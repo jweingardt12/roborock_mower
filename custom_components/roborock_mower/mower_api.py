@@ -1,4 +1,4 @@
-"""Write commands for Roborock RockMow devices.
+"""Read-only saved-area discovery and write commands for RockMow devices.
 
 RockMow mowing actions are sent through the V1 ``remote_pb`` RPC.  This module
 keeps the wire payload construction independent of Home Assistant so it can be
@@ -7,6 +7,7 @@ unit-tested with a mocked RPC channel.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Any
@@ -18,15 +19,18 @@ _LOGGER = logging.getLogger(__name__)
 
 REMOTE_PB_METHOD = "remote_pb"
 TYPE_APP_BUTTON = "APP_BUTTON"
+TYPE_GET_MOW_PREFERENCE_CONFIG = "GET_MOW_PREFERENCE_CONFIG"
 
 BUTTON_MOW_GLOBAL = "MOW_GLOBAL"
 BUTTON_MOW_EDGE = "MOW_EDGE"
+BUTTON_MOW_SELECT = "MOW_SELECT"
 BUTTON_MOW_PAUSE = "MOW_PAUSE"
 BUTTON_MOW_RESUME = "MOW_RESUME"
 BUTTON_MOW_END = "MOW_END"
 BUTTON_CHARGE = "CHARGE"
 
 PAUSED_MOW_STATES = frozenset({2, 58})
+_UNEXPECTED_RESULT_PREFIX = "Unexpected API Result: "
 
 
 def build_remote_message(payload: dict[str, Any], *, request_id: int | str | None = None) -> dict[str, Any]:
@@ -45,6 +49,81 @@ def start_button_for_state(mow_state: Any) -> str:
     except (TypeError, ValueError):
         state = None
     return BUTTON_MOW_RESUME if state in PAUSED_MOW_STATES else BUTTON_MOW_GLOBAL
+
+
+def _preference_config(response: Any) -> dict[str, Any] | None:
+    """Return the preference config object from a mower response."""
+
+    if not isinstance(response, dict):
+        return None
+    for key in ("preference_config", "mow_preference_config"):
+        if key in response:
+            config = response[key]
+            return config if isinstance(config, dict) else None
+    return response
+
+
+def _area_id_key(area_id: Any) -> str | None:
+    """Return a stable comparison key for a supported saved-area ID."""
+
+    if isinstance(area_id, bool) or not isinstance(area_id, int | str):
+        return None
+    if isinstance(area_id, str) and not area_id.strip():
+        return None
+    return str(area_id).strip()
+
+
+def parse_saved_areas(response: Any) -> list[dict[str, Any]]:
+    """Parse safe, named saved areas from GET_MOW_PREFERENCE_CONFIG data.
+
+    The reference app response stores saved areas under ``custom`` as
+    ``area_id``/``area_name`` pairs. Entries with missing or unsupported IDs,
+    blank names, duplicate IDs, or duplicate display names are omitted rather
+    than guessing which option a user intended to select.
+    """
+
+    config = _preference_config(response)
+    custom = config.get("custom") if config is not None else None
+    if not isinstance(custom, list):
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    for raw_area in custom:
+        if not isinstance(raw_area, dict):
+            continue
+        area_id = raw_area.get("area_id")
+        id_key = _area_id_key(area_id)
+        name = raw_area.get("area_name")
+        if id_key is None or not isinstance(name, str) or not name.strip():
+            continue
+        candidates.append({"id": area_id, "name": name})
+
+    id_counts: dict[str, int] = {}
+    name_counts: dict[str, int] = {}
+    for area in candidates:
+        id_key = _area_id_key(area["id"])
+        name_key = str(area["name"]).strip().casefold()
+        if id_key is not None:
+            id_counts[id_key] = id_counts.get(id_key, 0) + 1
+        name_counts[name_key] = name_counts.get(name_key, 0) + 1
+
+    safe_areas: list[dict[str, Any]] = []
+    for area in candidates:
+        id_key = _area_id_key(area["id"])
+        name_key = str(area["name"]).strip().casefold()
+        if id_key is not None and id_counts.get(id_key, 0) == 1 and name_counts.get(name_key, 0) == 1:
+            safe_areas.append(area)
+    return safe_areas
+
+
+def _boundaries_payload(areas: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build the ``modify_map`` payload used by area mowing."""
+
+    return {
+        "boundaries": [
+            {"id": area["id"], "name": area.get("name", "")} for area in areas
+        ]
+    }
 
 
 class MowerApi:
@@ -67,11 +146,33 @@ class MowerApi:
             _LOGGER.warning("[%s] RockMow remote_pb command failed", self._duid, exc_info=True)
             raise
 
-    async def _send_button(self, app_button: str) -> Any:
+    async def _query(self, payload: dict[str, Any]) -> Any:
+        """Send a read-only remote_pb query and decode its JSON result."""
+
+        try:
+            result = await self._send_remote_msg(payload)
+        except RoborockException as err:
+            text = str(err)
+            marker = text.find(_UNEXPECTED_RESULT_PREFIX)
+            if marker == -1:
+                raise
+            raw = text[marker + len(_UNEXPECTED_RESULT_PREFIX) :]
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                raise err from None
+        if isinstance(result, str):
+            try:
+                return json.loads(result)
+            except json.JSONDecodeError:
+                return result
+        return result
+
+    async def _send_button(self, app_button: str, **extra: Any) -> Any:
         """Send an app-button command."""
 
         return await self._send_remote_msg(
-            {"type": TYPE_APP_BUTTON, "app_button": app_button}
+            {"type": TYPE_APP_BUTTON, "app_button": app_button, **extra}
         )
 
     async def start(self) -> Any:
@@ -104,7 +205,42 @@ class MowerApi:
 
         return await self._send_button(BUTTON_MOW_EDGE)
 
+    async def start_area_mow(self, areas: list[dict[str, Any]]) -> Any:
+        """Start a saved-area mow with the app's MOW_SELECT payload."""
+
+        if not areas:
+            raise ValueError("start_area_mow requires at least one area")
+        return await self._send_button(
+            BUTTON_MOW_SELECT,
+            modify_map=_boundaries_payload(areas),
+        )
+
     async def stop(self) -> Any:
         """Stop/end the current mowing task."""
 
         return await self._send_button(BUTTON_MOW_END)
+
+    async def get_mow_preference_config(self) -> dict[str, Any] | None:
+        """Read the mower's saved mowing preferences without sending a write."""
+
+        try:
+            response = await self._query({"type": TYPE_GET_MOW_PREFERENCE_CONFIG})
+        except RoborockException as err:
+            _LOGGER.debug(
+                "[%s] GET_MOW_PREFERENCE_CONFIG failed: %s",
+                self._duid,
+                err,
+            )
+            return None
+        return _preference_config(response)
+
+    async def get_areas(self) -> list[dict[str, Any]]:
+        """Return safe named areas from the read-only preference query."""
+
+        config = await self.get_mow_preference_config()
+        return parse_saved_areas(config)
+
+    async def get_saved_areas(self) -> list[dict[str, Any]]:
+        """Compatibility alias for the saved-area discovery method."""
+
+        return await self.get_areas()

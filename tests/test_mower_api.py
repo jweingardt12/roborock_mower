@@ -7,6 +7,7 @@ AsyncMock channel and never connect to Home Assistant or a mower.
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import types
@@ -153,6 +154,89 @@ class RemotePbPayloadTests(unittest.IsolatedAsyncioTestCase):
                 "app_button": "MOW_END",
             },
         )
+
+    async def test_start_area_mow_sends_exact_select_payload(self) -> None:
+        with patch.object(mower_api.time, "time", return_value=1700000000.123):
+            await self.api.start_area_mow(
+                [{"id": 2, "name": "Front"}, {"id": 3, "name": "Back"}]
+            )
+        self.rpc_channel.send_command.assert_awaited_once_with(
+            "remote_pb",
+            params={
+                "id": "1700000000123",
+                "type": "APP_BUTTON",
+                "app_button": "MOW_SELECT",
+                "modify_map": {
+                    "boundaries": [
+                        {"id": 2, "name": "Front"},
+                        {"id": 3, "name": "Back"},
+                    ]
+                },
+            },
+        )
+
+    async def test_start_area_mow_rejects_empty_input_before_rpc(self) -> None:
+        with self.assertRaisesRegex(ValueError, "at least one area"):
+            await self.api.start_area_mow([])
+        self.rpc_channel.send_command.assert_not_awaited()
+
+    async def test_get_saved_areas_uses_read_only_preference_query(self) -> None:
+        response = {
+            "type": "MOW_PREFERENCE_CONFIG",
+            "preference_config": {
+                "global": {"mode": "GLOBAL"},
+                "custom": [
+                    {"area_id": 2, "area_name": "Front"},
+                    {"area_id": 3, "area_name": "Back"},
+                ],
+            },
+        }
+        self.rpc_channel.send_command.side_effect = RoborockException(
+            f"Unexpected API Result: {json.dumps(response)}"
+        )
+        with patch.object(mower_api.time, "time", return_value=1700000000.123):
+            areas = await self.api.get_saved_areas()
+        self.assertEqual(
+            areas,
+            [{"id": 2, "name": "Front"}, {"id": 3, "name": "Back"}],
+        )
+        self.rpc_channel.send_command.assert_awaited_once_with(
+            "remote_pb",
+            params={
+                "id": "1700000000123",
+                "type": "GET_MOW_PREFERENCE_CONFIG",
+            },
+        )
+
+    async def test_get_saved_areas_ignores_malformed_and_ambiguous_entries(self) -> None:
+        self.rpc_channel.send_command.return_value = {
+            "preference_config": {
+                "custom": [
+                    {"area_id": 1, "area_name": "Duplicate"},
+                    {"area_id": 2, "area_name": "duplicate"},
+                    {"area_id": 3, "area_name": "Unique"},
+                    {"area_name": "Missing ID"},
+                    {"area_id": None, "area_name": "Missing ID"},
+                    {"area_id": 4, "area_name": ""},
+                    "not-an-area",
+                ]
+            }
+        }
+        areas = await self.api.get_saved_areas()
+        self.assertEqual(areas, [{"id": 3, "name": "Unique"}])
+
+    async def test_get_saved_areas_returns_empty_for_missing_or_wrong_shape(self) -> None:
+        for response in (
+            None,
+            [],
+            {"preference_config": None},
+            {"preference_config": {"custom": {"area_id": 1}}},
+        ):
+            with self.subTest(response=response):
+                self.rpc_channel.reset_mock()
+                self.rpc_channel.send_command.return_value = response
+                self.assertEqual(await self.api.get_saved_areas(), [])
+                self.rpc_channel.send_command.assert_awaited_once()
 
 
 class WriteControlGatingTests(unittest.TestCase):

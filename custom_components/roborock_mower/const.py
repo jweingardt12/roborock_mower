@@ -13,6 +13,7 @@ PLATFORMS: Final = [
     Platform.LAWN_MOWER,
     Platform.SENSOR,
     Platform.BINARY_SENSOR,
+    Platform.SELECT,
 ]
 
 CONF_USER_DATA: Final = "user_data"
