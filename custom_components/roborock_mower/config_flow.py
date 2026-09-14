@@ -17,9 +17,11 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.const import CONF_CODE, CONF_EMAIL
+from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import CONF_HOME_DATA, CONF_USER_DATA, DOMAIN, ROCKMOW_Z1_NAME
+from .control import CONF_ENABLE_CONTROLS
 from .coordinator import find_mower_devices
 
 _LOGGER = logging.getLogger(__name__)
@@ -31,6 +33,13 @@ class RoborockMowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Roborock Mower."""
 
     VERSION = 1
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: config_entries.ConfigEntry) -> config_entries.OptionsFlow:
+        """Return the options flow for the explicit mower controls setting."""
+
+        return RoborockMowerOptionsFlow(config_entry)
 
     def __init__(self) -> None:
         """Initialize the flow."""
@@ -238,4 +247,33 @@ class RoborockMowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             ),
             errors=errors,
+        )
+
+
+class RoborockMowerOptionsFlow(config_entries.OptionsFlow):
+    """Configure optional Roborock mower write controls."""
+
+    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+        """Initialize the options flow."""
+
+        self._config_entry = config_entry
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Enable or disable command entities and actions."""
+
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        CONF_ENABLE_CONTROLS,
+                        default=bool(self._config_entry.options.get(CONF_ENABLE_CONTROLS, False)),
+                    ): bool
+                }
+            ),
         )

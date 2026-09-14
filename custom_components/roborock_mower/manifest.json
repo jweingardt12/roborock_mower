@@ -4,8 +4,8 @@
   "codeowners": [],
   "config_flow": true,
   "dependencies": [],
-  "documentation": "https://github.com/custom-components/roborock_mower",
+  "documentation": "https://github.com/jweingardt12/roborock_mower",
   "iot_class": "cloud_push",
-  "requirements": ["python-roborock>=5.14.2"],
-  "version": "0.2.3"
+  "requirements": ["python-roborock==7.7.1"],
+  "version": "0.3.0"
 }

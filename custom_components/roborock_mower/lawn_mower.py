@@ -4,15 +4,19 @@ from __future__ import annotations
 
 from typing import Any
 
-from homeassistant.components.lawn_mower import LawnMowerActivity, LawnMowerEntity
+from roborock.exceptions import RoborockException
+
+from homeassistant.components.lawn_mower import LawnMowerActivity, LawnMowerEntity, LawnMowerEntityFeature
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, STATUS_CHARGE_STATE, STATUS_ERROR_CODE, STATUS_MOW_STATE
 from .coordinator import RoborockMowerCoordinator, RoborockMowerDevice, mower_device_id, status_value
+from .mower_api import MowerApi
 
 
 MOWING_STATES = {1, 51, 55, 56, 57, 76}
@@ -30,15 +34,16 @@ async def async_setup_entry(
     """Set up Roborock mower lawn mower entities."""
 
     coordinator: RoborockMowerCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities(RoborockMowerEntity(coordinator, mower_id) for mower_id in coordinator.data)
+    async_add_entities(
+        RoborockMowerEntity(coordinator, mower_id) for mower_id in coordinator.data
+    )
 
 
 class RoborockMowerEntity(CoordinatorEntity[RoborockMowerCoordinator], LawnMowerEntity):
-    """Read-only Roborock mower entity."""
+    """Represent a Roborock mower, with optional explicitly enabled controls."""
 
     _attr_has_entity_name = True
     _attr_name = None
-    _attr_supported_features = 0
 
     def __init__(self, coordinator: RoborockMowerCoordinator, mower_id: str) -> None:
         """Initialize the lawn mower entity."""
@@ -46,6 +51,13 @@ class RoborockMowerEntity(CoordinatorEntity[RoborockMowerCoordinator], LawnMower
         super().__init__(coordinator)
         self._mower_id = mower_id
         self._attr_unique_id = mower_id
+        self._attr_supported_features = (
+            LawnMowerEntityFeature.START_MOWING
+            | LawnMowerEntityFeature.PAUSE
+            | LawnMowerEntityFeature.DOCK
+            if coordinator.write_controls_enabled_for(mower_id)
+            else LawnMowerEntityFeature(0)
+        )
 
     @property
     def _mower(self) -> RoborockMowerDevice | None:
@@ -114,6 +126,40 @@ class RoborockMowerEntity(CoordinatorEntity[RoborockMowerCoordinator], LawnMower
             "mqtt_subscribed": self.coordinator.mqtt_subscribed.get(self._mower_id),
             "last_mqtt_error": self.coordinator.last_mqtt_error,
         }
+
+    def _command_api(self) -> MowerApi:
+        """Return the command API or fail closed when writes are unavailable."""
+
+        api = self.coordinator.mower_api_for(self._mower_id)
+        if api is None:
+            raise HomeAssistantError("Roborock mower controls are not available")
+        return api
+
+    async def async_start_mowing(self) -> None:
+        """Start a full mow or resume a paused task."""
+
+        try:
+            await self._command_api().start_or_resume(
+                status_value(self._mower.device, STATUS_MOW_STATE) if self._mower else None
+            )
+        except RoborockException as err:
+            raise HomeAssistantError(f"Roborock mower start failed: {err}") from err
+
+    async def async_pause(self) -> None:
+        """Pause the current mowing task."""
+
+        try:
+            await self._command_api().pause()
+        except RoborockException as err:
+            raise HomeAssistantError(f"Roborock mower pause failed: {err}") from err
+
+    async def async_dock(self) -> None:
+        """Return the mower to its dock."""
+
+        try:
+            await self._command_api().dock()
+        except RoborockException as err:
+            raise HomeAssistantError(f"Roborock mower dock failed: {err}") from err
 
 
 def _int_or_none(value: Any) -> int | None:

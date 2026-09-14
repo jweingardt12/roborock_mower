@@ -2,9 +2,9 @@
 
 ![Roborock Mower unofficial integration logo](../../assets/roborock_mower_logo.svg)
 
-Read-only Home Assistant custom integration for Roborock RockMow Z1 / Z115.
+Read-only by default Home Assistant custom integration for Roborock RockMow Z1 / Z115. Optional write controls are disabled unless explicitly enabled in the integration options.
 
-Version 0.2 uses Roborock MQTT/DPS push as the primary status source and keeps `get_home_data_v3(user_data)` as a slow cloud fallback.
+Version 0.3 uses Roborock MQTT/DPS push as the primary status source and keeps `get_home_data_v3(user_data)` as a slow cloud fallback.
 
 ## Supported device
 
@@ -50,6 +50,19 @@ It also creates these read-only status entities:
 - `binary_sensor.<device>_online`
 
 All entities are linked to the same Home Assistant device. Unique IDs use DUID, with SN as fallback.
+
+## Optional mower controls
+
+The main `lawn_mower` entity is read-only by default. To expose start/resume, pause, and dock actions, open the integration's **Configure** dialog and enable **Mower controls**. The option defaults to disabled and is stored in the config entry options.
+
+When enabled, only the exact tested model `roborock.mower.a235` receives write actions. Two additional buttons are exposed:
+
+- `button.<device>_edge_cut`
+- `button.<device>_stop` (stop/end task)
+
+The controls send the app-style `remote_pb` RPC with `APP_BUTTON` values: `MOW_GLOBAL`, `MOW_RESUME`, `MOW_PAUSE`, `CHARGE`, `MOW_EDGE`, and `MOW_END` respectively. Start/resume chooses `MOW_RESUME` when the mower reports a paused state; otherwise it sends `MOW_GLOBAL`.
+
+The command payload and action mapping were ported from the RockNeo preview to the python-roborock 7.x V1 RPC channel. This protocol is **not live-verified on the exact a235 RockMow**. Enabling controls is experimental and may cause unexpected behavior; keep the option disabled unless you intentionally accept that risk.
 
 The `gps_raw` sensor keeps Roborock's raw DPS `142` value as its state. When the observed RockMow GPS payload format can be decoded, it also exposes `latitude` and `longitude` attributes. This is still treated as an experimental "last known position" value, not a live tracker.
 
@@ -129,14 +142,6 @@ If the standalone MQTT probe sees activity but Home Assistant does not update, c
 
 Diagnostics redact sensitive values such as `localKey`, `duid`, `sn`, `token`, and `rriot`.
 
-## Not implemented yet
+## Not implemented
 
-No commands are implemented in this version. Future button/action support may use these mower DPS command IDs once the command payloads are verified safely:
-
-- start = 201
-- dock = 202
-- pause = 203
-- resume = 204
-- stop = 205
-
-No map, zone, or area-name decoding is implemented yet.
+No map, zone, or area-name decoding is implemented yet. The write-action protocol above remains unverified on a235 until live testing is explicitly authorized.

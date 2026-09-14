@@ -39,5 +39,26 @@
       "reauth_entry_not_found": "Could not find the Roborock Mower entry to reauthenticate.",
       "reauth_successful": "Roborock Mower reauthentication was successful."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Roborock Mower controls",
+        "description": "Write actions are disabled by default. Enable them only if you accept the experimental command protocol.",
+        "data": {
+          "enable_controls": "Enable mower controls"
+        }
+      }
+    }
+  },
+  "entity": {
+    "button": {
+      "edge_cut": {
+        "name": "Edge cut"
+      },
+      "stop": {
+        "name": "Stop/end task"
+      }
+    }
   }
 }

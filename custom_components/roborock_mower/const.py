@@ -6,13 +6,19 @@ from typing import Final
 from homeassistant.const import Platform
 
 DOMAIN: Final = "roborock_mower"
-PLATFORMS: Final = [Platform.LAWN_MOWER, Platform.SENSOR, Platform.BINARY_SENSOR]
+CONF_ENABLE_CONTROLS: Final = "enable_controls"
+ROCKMOW_Z1_MODEL: Final = "roborock.mower.a235"
+PLATFORMS: Final = [
+    Platform.BUTTON,
+    Platform.LAWN_MOWER,
+    Platform.SENSOR,
+    Platform.BINARY_SENSOR,
+]
 
 CONF_USER_DATA: Final = "user_data"
 CONF_HOME_DATA: Final = "home_data"
 
 MOWER_CATEGORY: Final = "roborock.mower"
-ROCKMOW_Z1_MODEL: Final = "roborock.mower.a235"
 ROCKMOW_Z1_NAME: Final = "RockMow Z1"
 
 # python-roborock currently limits home data calls to 5 per hour.

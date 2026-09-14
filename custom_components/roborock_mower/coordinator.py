@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 import logging
 from typing import Any
 
+from roborock.devices.cache import DeviceCache, NoCache
+from roborock.devices.rpc.v1_channel import create_v1_channel
 from roborock.devices.transport.mqtt_channel import MqttChannel
 from roborock.data import HomeData, HomeDataDevice, HomeDataProduct, UserData
 from roborock.exceptions import RoborockException, RoborockInvalidCredentials, RoborockRateLimit
@@ -39,6 +41,8 @@ from .const import (
     ROCKMOW_Z1_MODEL,
     SCAN_INTERVAL,
 )
+from .control import write_controls_enabled
+from .mower_api import MowerApi
 
 _LOGGER = logging.getLogger(__name__)
 MQTT_RESTART_DELAY = timedelta(seconds=30)
@@ -124,6 +128,9 @@ class RoborockMowerCoordinator(DataUpdateCoordinator[dict[str, RoborockMowerDevi
         self._last_device_status: dict[str, dict[str, Any]] = {}
         self._mqtt_session: Any | None = None
         self._mqtt_tasks: list[Any] = []
+        self._command_channels: dict[str, Any] = {}
+        self._command_unsubscribes: dict[str, Any] = {}
+        self._mower_apis: dict[str, MowerApi] = {}
         self._offline_callbacks: dict[str, Any] = {}
         self._stopping_mqtt = False
         self.client = RoborockApiClient(
@@ -143,6 +150,17 @@ class RoborockMowerCoordinator(DataUpdateCoordinator[dict[str, RoborockMowerDevi
             self.data = find_mower_devices(HomeData.from_dict(home_data))
             for mower_id, mower in self.data.items():
                 self._last_device_status[mower_id] = dict(mower.device.device_status or {})
+
+    def write_controls_enabled_for(self, mower_id: str) -> bool:
+        """Return whether writes are explicitly enabled for this exact mower model."""
+
+        mower = self.data.get(mower_id)
+        return mower is not None and write_controls_enabled(self.entry.options, mower.product.model)
+
+    def mower_api_for(self, mower_id: str) -> MowerApi | None:
+        """Return the command API prepared for a mower, if writes are available."""
+
+        return self._mower_apis.get(mower_id)
 
     async def async_start_mqtt(self) -> None:
         """Start listening for MQTT DPS updates."""
@@ -178,6 +196,34 @@ class RoborockMowerCoordinator(DataUpdateCoordinator[dict[str, RoborockMowerDevi
                 )
                 continue
 
+            if self.write_controls_enabled_for(mower_id):
+                try:
+                    command_channel = create_v1_channel(
+                        self.user_data,
+                        mqtt_params,
+                        self._mqtt_session,
+                        mower.device,
+                        DeviceCache(mower.device.duid, NoCache()),
+                    )
+                    # V1Channel connects its local/MQTT RPC transports from
+                    # subscribe(). Keep a no-op subscription alive for the
+                    # lifetime of the coordinator so command RPCs have an
+                    # active transport without changing the status path.
+                    command_unsubscribe = await command_channel.subscribe(lambda _message: None)
+                except RoborockException as err:
+                    _LOGGER.warning(
+                        "Could not prepare write channel for mower %s; controls will be unavailable: %s",
+                        mower.device.name,
+                        err,
+                    )
+                else:
+                    self._command_channels[mower_id] = command_channel
+                    self._command_unsubscribes[mower_id] = command_unsubscribe
+                    self._mower_apis[mower_id] = MowerApi(
+                        command_channel.rpc_channel,
+                        mower.device.duid,
+                    )
+
             self.mqtt_subscribed[mower_id] = False
             task = self.hass.async_create_task(
                 self._async_mqtt_watch_loop(mower_id, mower.device.name, channel)
@@ -196,6 +242,11 @@ class RoborockMowerCoordinator(DataUpdateCoordinator[dict[str, RoborockMowerDevi
         for cancel in self._offline_callbacks.values():
             cancel()
         self._offline_callbacks.clear()
+        for unsubscribe in self._command_unsubscribes.values():
+            unsubscribe()
+        self._command_unsubscribes.clear()
+        self._command_channels.clear()
+        self._mower_apis.clear()
 
         if self._mqtt_session is not None:
             await self._mqtt_session.close()

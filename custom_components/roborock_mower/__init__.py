@@ -17,8 +17,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_start_mqtt()
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+    entry.async_on_unload(entry.add_update_listener(_async_options_update_listener))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
+
+
+async def _async_options_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Reload entities when the explicit controls option changes."""
+
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -29,7 +36,3 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         coordinator: RoborockMowerCoordinator = hass.data[DOMAIN].pop(entry.entry_id)
         await coordinator.async_stop_mqtt()
     return unload_ok
-
-
-# TODO: Add read-write button entities later when command handling is understood:
-# start = 201, dock = 202, pause = 203, resume = 204, stop = 205.
